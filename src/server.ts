@@ -57,7 +57,7 @@ app.use(express.urlencoded({ limit: '10mb', extended: true }));
 // Request ID tracking
 app.use((req: Request, res: Response, next: NextFunction) => {
   req.id = require('uuid').v4();
-  res.setHeader('X-Request-ID', req.id);
+  res.setHeader('X-Request-ID', req.id as string);
   next();
 });
 

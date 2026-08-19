@@ -1,0 +1,158 @@
+import { Router, Response } from 'express';
+import { db } from '../config/database';
+import { logger } from '../utils/logger';
+import { AuthRequest, requireRole } from '../middleware/auth';
+import { verifyDeduplicationQuality, getDeduplicationReport } from '../services/deduplicationService';
+import { classifyUnanalyzedOpportunities, generateSummariesForOpportunities } from '../services/aiService';
+
+const router = Router();
+
+// All admin routes require admin or super_admin role
+router.use(requireRole(['admin', 'super_admin']));
+
+// GET /api/admin/data-sources - connector status (proof for Milestone 2)
+router.get('/data-sources', async (req: AuthRequest, res: Response) => {
+  try {
+    const sources = await db.query('SELECT * FROM data_sources ORDER BY code');
+    const logs = await db.query(
+      `SELECT * FROM connector_logs ORDER BY started_at DESC LIMIT 20`
+    );
+    res.json({ sources: sources.rows, recentRuns: logs.rows });
+  } catch (err: any) {
+    logger.error('Admin data-sources error:', err);
+    res.status(500).json({ error: 'Failed to fetch data sources' });
+  }
+});
+
+// GET /api/admin/deduplication/report - proof for Milestone 3
+router.get('/deduplication/report', async (req: AuthRequest, res: Response) => {
+  try {
+    const report = await getDeduplicationReport();
+    const isValid = await verifyDeduplicationQuality();
+    res.json({ ...report, verified_no_exact_duplicates: isValid });
+  } catch (err: any) {
+    logger.error('Admin dedup report error:', err);
+    res.status(500).json({ error: 'Failed to generate deduplication report' });
+  }
+});
+
+// POST /api/admin/ai/classify-batch - manually trigger classification batch (Milestone 6)
+router.post('/ai/classify-batch', async (req: AuthRequest, res: Response) => {
+  try {
+    const limit = parseInt(req.body.limit) || 100;
+    const result = await classifyUnanalyzedOpportunities(limit);
+    res.json(result);
+  } catch (err: any) {
+    logger.error('Admin classify batch error:', err);
+    res.status(500).json({ error: 'Batch classification failed' });
+  }
+});
+
+// POST /api/admin/ai/summarize-batch - manually trigger summary batch (Milestone 7)
+router.post('/ai/summarize-batch', async (req: AuthRequest, res: Response) => {
+  try {
+    const limit = parseInt(req.body.limit) || 50;
+    const generated = await generateSummariesForOpportunities(limit);
+    res.json({ generated });
+  } catch (err: any) {
+    logger.error('Admin summarize batch error:', err);
+    res.status(500).json({ error: 'Batch summarization failed' });
+  }
+});
+
+// GET /api/admin/security-incidents - cross-company access attempts, etc. (Milestone 8/12)
+router.get('/security-incidents', async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await db.query(
+      'SELECT * FROM security_incidents ORDER BY created_at DESC LIMIT 100'
+    );
+    res.json(result.rows);
+  } catch (err: any) {
+    logger.error('Admin security incidents error:', err);
+    res.status(500).json({ error: 'Failed to fetch security incidents' });
+  }
+});
+
+// GET /api/admin/audit-logs
+router.get('/audit-logs', async (req: AuthRequest, res: Response) => {
+  try {
+    const { entity_type, page = '1', limit = '50' } = req.query as Record<string, string>;
+    const conditions: string[] = ['1=1'];
+    const params: any[] = [];
+    let idx = 1;
+
+    if (entity_type) {
+      conditions.push(`entity_type = $${idx++}`);
+      params.push(entity_type);
+    }
+
+    const pageNum = Math.max(parseInt(page) || 1, 1);
+    const limitNum = Math.min(Math.max(parseInt(limit) || 50, 1), 200);
+    const offset = (pageNum - 1) * limitNum;
+
+    const result = await db.query(
+      `SELECT * FROM audit_logs WHERE ${conditions.join(' AND ')}
+       ORDER BY created_at DESC LIMIT $${idx++} OFFSET $${idx++}`,
+      [...params, limitNum, offset]
+    );
+
+    res.json(result.rows);
+  } catch (err: any) {
+    logger.error('Admin audit logs error:', err);
+    res.status(500).json({ error: 'Failed to fetch audit logs' });
+  }
+});
+
+// GET /api/admin/backups - backup/restore status (Milestone 12)
+router.get('/backups', async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await db.query('SELECT * FROM backup_logs ORDER BY started_at DESC LIMIT 20');
+    res.json(result.rows);
+  } catch (err: any) {
+    logger.error('Admin backups error:', err);
+    res.status(500).json({ error: 'Failed to fetch backup logs' });
+  }
+});
+
+// GET /api/admin/system-health
+router.get('/system-health', async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await db.query(
+      'SELECT * FROM system_health ORDER BY checked_at DESC LIMIT 50'
+    );
+    res.json(result.rows);
+  } catch (err: any) {
+    logger.error('Admin system health error:', err);
+    res.status(500).json({ error: 'Failed to fetch system health' });
+  }
+});
+
+// GET /api/admin/seo-pages - SEO generation stats (Milestone 11)
+router.get('/seo-pages', async (req: AuthRequest, res: Response) => {
+  try {
+    const { brand_id } = req.query as Record<string, string>;
+    const conditions: string[] = ['1=1'];
+    const params: any[] = [];
+    let idx = 1;
+    if (brand_id) {
+      conditions.push(`brand_id = $${idx++}`);
+      params.push(brand_id);
+    }
+
+    const [pages, totalCount] = await Promise.all([
+      db.query(
+        `SELECT id, page_type, page_slug, page_title, is_published, google_indexed, page_views
+         FROM seo_pages WHERE ${conditions.join(' AND ')} ORDER BY created_at DESC LIMIT 100`,
+        params
+      ),
+      db.query(`SELECT COUNT(*) as total FROM seo_pages WHERE ${conditions.join(' AND ')}`, params),
+    ]);
+
+    res.json({ pages: pages.rows, total: parseInt(totalCount.rows[0].total) });
+  } catch (err: any) {
+    logger.error('Admin SEO pages error:', err);
+    res.status(500).json({ error: 'Failed to fetch SEO pages' });
+  }
+});
+
+export default router;

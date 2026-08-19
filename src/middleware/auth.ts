@@ -128,13 +128,13 @@ export const generateTokens = (userId: string, email: string) => {
   const accessToken = jwt.sign(
     { userId, email },
     process.env.JWT_SECRET || 'secret',
-    { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
+    { expiresIn: process.env.JWT_EXPIRES_IN || '7d' } as jwt.SignOptions
   );
 
   const refreshToken = jwt.sign(
     { userId, email },
     process.env.REFRESH_TOKEN_SECRET || 'refresh_secret',
-    { expiresIn: process.env.REFRESH_TOKEN_EXPIRES_IN || '30d' }
+    { expiresIn: process.env.REFRESH_TOKEN_EXPIRES_IN || '30d' } as jwt.SignOptions
   );
 
   return { accessToken, refreshToken };
