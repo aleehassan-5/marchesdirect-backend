@@ -119,6 +119,7 @@ const startServer = async () => {
     require('./jobs/documentExpiry').startExpiryCheck();
     require('./jobs/seoGeneration').startSEOGeneration();
     require('./jobs/backupManagement').startBackupSchedule();
+    require('./jobs/aiProcessing').startAIProcessing();
 
     // Start server
     app.listen(PORT, () => {

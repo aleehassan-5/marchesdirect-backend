@@ -149,18 +149,28 @@ Estimated Value: ${opp.estimated_value || 'Not specified'}`;
       }
     }
 
-    // Update opportunity with classification results
+    // Update opportunity with classification results.
+    // trade_id (not just ai_matched_trades) must be set here - it's what the
+    // opportunities listing/filter query (GET /api/opportunities?trade_id=...)
+    // actually reads. Without it, trade filtering silently returns nothing even
+    // after classification succeeds. Use the highest-confidence match.
+    const primaryTradeId = tradeIds.length > 0
+      ? tradeIds.slice().sort((a, b) => (b.confidence || 0) - (a.confidence || 0))[0].id
+      : null;
+
     await db.query(
       `UPDATE opportunities SET
         ai_classification_status = $1,
         ai_matched_trades = $2,
-        cpv_code_id = $3,
-        complexity_level = $4,
+        trade_id = $3,
+        cpv_code_id = $4,
+        complexity_level = $5,
         updated_at = NOW()
-       WHERE id = $5`,
+       WHERE id = $6`,
       [
         'classified',
         JSON.stringify(tradeIds),
+        primaryTradeId,
         cpvCodeId,
         classification.complexity || 'medium',
         opportunityId,
@@ -239,6 +249,13 @@ export const matchOpportunitiesToCompany = async (
            t.id IN (SELECT id FROM trades WHERE name = ANY($6::text[]))
            OR o.ai_matched_trades::text ILIKE ANY($6::text[])
          )
+         -- TODO(review with client): $7 is bound to company.annual_revenue below,
+         -- used here as a MINIMUM opportunity value. That means a company with high
+         -- annual revenue gets smaller/subcontracting opportunities filtered OUT
+         -- entirely, which seems backwards for a platform whose "sous-traitance"
+         -- journey is specifically about matching companies to smaller lots. Left
+         -- as-is rather than silently changed - needs a real business-rule decision,
+         -- not a guess.
          AND (
            $7::decimal IS NULL OR o.estimated_value >= $7
          )
