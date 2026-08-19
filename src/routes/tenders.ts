@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { AuthRequest } from '../middleware/auth';
+import { generateBidPackageZip, uploadToS3IfConfigured } from '../services/documentService';
 
 const router = Router();
 
@@ -195,6 +196,59 @@ router.post('/bid/:bidId/generate', async (req: AuthRequest, res: Response) => {
   } catch (err: any) {
     logger.error('Bid document generation error:', err);
     res.status(500).json({ error: 'Failed to generate bid documents' });
+  }
+});
+
+// GET /api/tenders/bid/:bidId/package - generate the real downloadable bid package
+// (technical memo, engagement act, pricing schedule, DC1/DC2/DUME summary) as a ZIP.
+// This is the actual acceptance proof for Milestone 9 - text fields alone don't count.
+router.get('/bid/:bidId/package', async (req: AuthRequest, res: Response) => {
+  try {
+    const bidResult = await db.query(
+      `SELECT br.*, o.title as opportunity_title FROM bid_responses br
+       JOIN tenders t ON br.tender_id = t.id
+       JOIN opportunities o ON t.opportunity_id = o.id
+       WHERE br.id = $1 AND br.company_id = $2`,
+      [req.params.bidId, req.user!.companyId]
+    );
+
+    if (bidResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Bid response not found' });
+    }
+
+    const bid = bidResult.rows[0];
+
+    if (!bid.technical_memo_text || !bid.engagement_act_text) {
+      return res.status(400).json({
+        error: 'Documents not generated yet - call POST /bid/:bidId/generate first',
+      });
+    }
+
+    const companyResult = await db.query('SELECT name FROM companies WHERE id = $1', [req.user!.companyId]);
+
+    const zip = await generateBidPackageZip({
+      companyName: companyResult.rows[0]?.name || 'Entreprise',
+      technicalMemoText: bid.technical_memo_text,
+      engagementActText: bid.engagement_act_text,
+      pricingSchedule: bid.pricing_schedule_json || [],
+      missingDocuments: bid.missing_documents || [],
+      opportunityTitle: bid.opportunity_title,
+    });
+
+    const key = `bid-packages/${req.user!.companyId}/${bid.id}.zip`;
+    const s3Url = await uploadToS3IfConfigured(key, zip, 'application/zip');
+
+    if (s3Url) {
+      return res.json({ url: s3Url });
+    }
+
+    // No S3 configured (e.g. local dev) - stream the ZIP straight to the client instead.
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="dossier-candidature-${bid.id}.zip"`);
+    res.send(zip);
+  } catch (err: any) {
+    logger.error('Bid package generation error:', err);
+    res.status(500).json({ error: 'Failed to generate bid package' });
   }
 });
 
