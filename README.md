@@ -2,34 +2,59 @@
 
 **Version 1.0 | Node.js + Express + PostgreSQL**
 
-Complete backend for a French public procurement opportunities platform with AI-powered classification, intelligent matching, and multi-tenant architecture.
+Backend for a French public procurement opportunities platform with AI-powered
+classification, intelligent matching, and multi-tenant architecture.
+
+---
+
+## ✅ Implementation status (honest, as of this pass)
+
+| Area | Status |
+| --- | --- |
+| Schema, DB connection, JWT middleware | Written, `tsc --noEmit` clean |
+| Auth (`authService.ts`), routes wired | Written, not yet exercised against a live DB |
+| BOAMP/PLACE/TED connectors (M2), dedup (M3) | Written, no live run with the required 3 automatic executions demonstrated yet |
+| AI classification/matching/summaries (M6-7) | Written (`aiService.ts`), no live-data test or chatbot accuracy benchmark run yet |
+| Documents / S3 (M9) | Written, S3 not configured/tested |
+| Stripe billing, CRM export (M8) | Routes exist (`subscriptions.ts`, `crm.ts`); Stripe/CRM API calls not wired to real accounts |
+| `scripts/migrate.js`, `scripts/seed.js` | Referenced in `package.json`, **do not exist yet** - load `schema.sql` manually for now |
+
+This section exists so the README doesn't silently drift from reality again -
+please update the table (not just the code) when a row's status changes.
 
 ---
 
 ## 🚀 Quick Start
 
 ### Prerequisites
-- Node.js 18+ 
+- Node.js 18+
 - PostgreSQL 14+
-- Redis (for job queue & caching)
-- AWS S3 (for file storage)
+- AWS S3 (only needed once document upload/generation - M9 - is wired to real storage;
+  the API runs fine without it for everything else)
+
+> Redis is **not** currently required — scheduled jobs (`src/jobs/`) run on
+> `node-cron` in-process, not on a Redis-backed queue. `bull` is listed in
+> `package.json` for a possible future job-queue upgrade but isn't imported
+> anywhere in `src/` yet.
 
 ### Installation
 
 ```bash
 # Clone and setup
 git clone <repo>
-cd procurement-platform-backend
+cd marchesdirect-backend
 npm install
 
 # Setup environment
 cp .env.example .env
-# Edit .env with your configuration
+# Edit .env - at minimum set DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD and JWT_SECRET.
+# Stripe/AWS/CRM keys can stay blank until you're testing those specific features.
 
-# Create database and tables
+# Create the database, then load the schema
+createdb procurement_platform          # or: psql -U postgres -c "CREATE DATABASE procurement_platform;"
 psql -U postgres -d procurement_platform -f schema.sql
 
-# Start development server
+# Start development server (ts-node, no build step)
 npm run dev
 
 # Production build
@@ -37,67 +62,69 @@ npm run build
 npm start
 ```
 
+> Note: `npm run db:migrate` / `npm run db:seed` are defined in `package.json` but
+> `scripts/migrate.js` and `scripts/seed.js` don't exist in the repo yet — load
+> `schema.sql` directly with `psql` as shown above until those are added.
+
 ---
 
 ## 📋 Project Structure
 
+This reflects what's actually in `src/` today (last checked against the repo directly -
+if you add/remove files, please keep this list in sync so it doesn't go stale again):
+
 ```
 src/
 ├── config/
-│   ├── database.ts              # PostgreSQL connection pool
-│   └── redis.ts                 # Redis client (job queue)
+│   └── database.ts              # PostgreSQL connection pool (pg.Pool)
 │
 ├── middleware/
-│   ├── auth.ts                  # JWT authentication, MFA
-│   ├── errorHandler.ts          # Global error handling
-│   └── validation.ts            # Request validation
+│   ├── auth.ts                  # JWT authentication
+│   └── errorHandler.ts          # Global error handling
 │
-├── services/
-│   ├── authService.ts           # Login, registration, MFA (M8)
-│   ├── dataCollectionService.ts # BOAMP, PLACE, TED connectors (M2)
+├── services/                    # Business logic lives here directly (no separate
+│   │                             # controllers/ layer - routes call services inline)
+│   ├── authService.ts           # Login, registration (M8)
+│   ├── dataCollectionService.ts # BOAMP/PLACE/TED connectors (M2)
 │   ├── deduplicationService.ts  # Duplicate detection & merging (M3)
-│   ├── aiService.ts             # Claude API for classification, matching, summaries (M6-7)
-│   ├── stripeService.ts         # Stripe subscriptions & payments (M8)
-│   ├── documentService.ts       # S3 file handling & document generation (M9)
-│   └── seoService.ts            # SEO page generation (M11)
-│
-├── controllers/
-│   ├── authController.ts
-│   ├── opportunitiesController.ts
-│   ├── companiesController.ts
-│   ├── dashboardController.ts
-│   ├── tenderController.ts
-│   ├── chatbotController.ts
-│   └── adminController.ts
+│   ├── aiService.ts             # Claude/OpenAI classification, matching, summaries (M6-7)
+│   └── documentService.ts       # S3 file handling & document generation (M9)
 │
 ├── routes/
 │   ├── auth.ts
 │   ├── opportunities.ts
+│   ├── trades.ts
+│   ├── subscriptions.ts
 │   ├── companies.ts
 │   ├── dashboard.ts
 │   ├── tenders.ts
+│   ├── alerts.ts
 │   ├── chatbot.ts
+│   ├── documents.ts
 │   ├── crm.ts
 │   └── admin.ts
 │
-├── jobs/
+├── jobs/                        # node-cron based, started from server.ts on boot
 │   ├── dataCollection.ts        # Scheduled data collection (M2)
-│   ├── documentExpiry.ts        # Document expiry alerts (M6)
+│   ├── documentExpiry.ts        # Document expiry alerts
 │   ├── seoGeneration.ts         # SEO page generation (M11)
 │   ├── backupManagement.ts      # Database backups (M12)
 │   └── aiProcessing.ts          # Batch AI classification & summaries
 │
 ├── utils/
-│   ├── logger.ts                # Winston logging
-│   ├── validators.ts            # Input validation rules
-│   ├── helpers.ts               # Utility functions
-│   └── constants.ts             # Global constants
+│   └── logger.ts                # Winston logging
 │
 ├── types/
-│   └── index.ts                 # TypeScript interfaces
+│   └── express.d.ts             # Express Request augmentation (req.user, etc.)
 │
-└── server.ts                    # Main Express server
+└── server.ts                    # Main Express server, route + job registration
 ```
+
+**Not built yet, referenced only in planning docs below:** a `stripeService.ts` (Stripe
+is in `package.json` but not wired into any route yet), a dedicated `seoService.ts`
+(SEO generation currently lives entirely in `jobs/seoGeneration.ts`), a `controllers/`
+layer, and `utils/validators.ts` / `helpers.ts` / `constants.ts`. If you add these,
+update this section.
 
 ---
 
