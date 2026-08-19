@@ -1,0 +1,174 @@
+import { Request, Response, NextFunction } from 'express';
+import jwt from 'jsonwebtoken';
+import { db } from '../config/database';
+import { logger } from '../utils/logger';
+
+export interface AuthRequest extends Request {
+  user?: {
+    id: string;
+    email: string;
+    companyId: string;
+    role: string;
+  };
+  company?: any;
+}
+
+// Verify JWT token
+export const authenticate = async (
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction
+) => {
+  try {
+    const token = req.headers.authorization?.split(' ')[1];
+
+    if (!token) {
+      return res.status(401).json({ error: 'No token provided' });
+    }
+
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret') as any;
+
+    // Fetch user from database
+    const result = await db.query(
+      'SELECT u.*, c.id as company_id FROM users u LEFT JOIN companies c ON u.company_id = c.id WHERE u.id = $1 AND u.deleted_at IS NULL',
+      [decoded.userId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(401).json({ error: 'User not found' });
+    }
+
+    const user = result.rows[0];
+
+    // Attach user to request
+    req.user = {
+      id: user.id,
+      email: user.email,
+      companyId: user.company_id,
+      role: user.role,
+    };
+
+    // Attach company to request
+    const companyResult = await db.query(
+      'SELECT * FROM companies WHERE id = $1 AND deleted_at IS NULL',
+      [user.company_id]
+    );
+
+    if (companyResult.rows.length > 0) {
+      req.company = companyResult.rows[0];
+    }
+
+    next();
+  } catch (err) {
+    logger.error('Auth error:', err);
+    res.status(401).json({ error: 'Invalid token' });
+  }
+};
+
+// Check for specific role
+export const requireRole = (roles: string[]) => {
+  return (req: AuthRequest, res: Response, next: NextFunction) => {
+    if (!req.user || !roles.includes(req.user.role)) {
+      return res.status(403).json({ error: 'Insufficient permissions' });
+    }
+    next();
+  };
+};
+
+// Prevent cross-company access
+export const checkCompanyAccess = async (
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction
+) => {
+  try {
+    const requestedCompanyId = req.params.companyId || req.body.companyId;
+
+    if (requestedCompanyId && requestedCompanyId !== req.user?.companyId && req.user?.role !== 'super_admin') {
+      logger.warn(`Unauthorized access attempt: User ${req.user?.id} tried to access company ${requestedCompanyId}`);
+      
+      // Log security incident
+      await db.query(
+        `INSERT INTO security_incidents (incident_type, severity, user_id, ip_address, description)
+         VALUES ($1, $2, $3, $4, $5)`,
+        ['unauthorized_access', 'high', req.user?.id, req.ip, `Cross-company access attempt: ${requestedCompanyId}`]
+      );
+
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    next();
+  } catch (err) {
+    logger.error('Company access check failed:', err);
+    res.status(500).json({ error: 'Access control error' });
+  }
+};
+
+// Optional authentication (for public routes that can be enhanced if logged in)
+export const optionalAuth = (req: AuthRequest, res: Response, next: NextFunction) => {
+  try {
+    const token = req.headers.authorization?.split(' ')[1];
+    
+    if (token) {
+      const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret') as any;
+      req.user = decoded;
+    }
+  } catch (err) {
+    // Silent fail for optional auth
+  }
+
+  next();
+};
+
+// ============================================================================
+// TOKEN GENERATION
+// ============================================================================
+
+export const generateTokens = (userId: string, email: string) => {
+  const accessToken = jwt.sign(
+    { userId, email },
+    process.env.JWT_SECRET || 'secret',
+    { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
+  );
+
+  const refreshToken = jwt.sign(
+    { userId, email },
+    process.env.REFRESH_TOKEN_SECRET || 'refresh_secret',
+    { expiresIn: process.env.REFRESH_TOKEN_EXPIRES_IN || '30d' }
+  );
+
+  return { accessToken, refreshToken };
+};
+
+// Verify refresh token
+export const verifyRefreshToken = (token: string) => {
+  try {
+    return jwt.verify(token, process.env.REFRESH_TOKEN_SECRET || 'refresh_secret') as any;
+  } catch (err) {
+    throw new Error('Invalid refresh token');
+  }
+};
+
+// ============================================================================
+// MFA HELPERS
+// ============================================================================
+
+export const generateMFASecret = () => {
+  const speakeasy = require('speakeasy');
+  return speakeasy.generateSecret({
+    name: `${process.env.MFA_ISSUER || 'Procurement Platform'}`,
+    issuer: process.env.MFA_ISSUER || 'Procurement Platform',
+  });
+};
+
+export const verifyMFAToken = (secret: string, token: string) => {
+  const speakeasy = require('speakeasy');
+  const window = parseInt(process.env.MFA_WINDOW || '2');
+  
+  return speakeasy.totp.verify({
+    secret: secret,
+    encoding: 'base32',
+    token: token,
+    window: window,
+  });
+};

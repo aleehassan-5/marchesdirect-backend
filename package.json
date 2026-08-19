@@ -1,0 +1,63 @@
+{
+  "name": "procurement-platform-backend",
+  "version": "1.0.0",
+  "description": "French Public Procurement Opportunities Platform - Backend API",
+  "main": "dist/src/server.js",
+  "scripts": {
+    "dev": "ts-node src/server.ts",
+    "build": "tsc",
+    "start": "node dist/src/server.js",
+    "db:migrate": "node scripts/migrate.js",
+    "db:seed": "node scripts/seed.js",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "lint": "eslint src --ext .ts",
+    "lint:fix": "eslint src --ext .ts --fix"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "pg": "^8.11.3",
+    "typescript": "^5.3.3",
+    "dotenv": "^16.3.1",
+    "bcryptjs": "^2.4.3",
+    "jsonwebtoken": "^9.1.2",
+    "cors": "^2.8.5",
+    "helmet": "^7.1.0",
+    "express-validator": "^7.0.0",
+    "axios": "^1.6.5",
+    "aws-sdk": "^2.1562.0",
+    "stripe": "^14.7.0",
+    "bull": "^4.11.5",
+    "redis": "^4.6.12",
+    "node-cron": "^3.0.2",
+    "uuid": "^9.0.1",
+    "slugify": "^1.6.6",
+    "xml2js": "^0.6.2",
+    "rss-parser": "^3.13.0",
+    "cheerio": "^1.0.0-rc.12",
+    "lodash": "^4.17.21",
+    "winston": "^3.11.0",
+    "morgan": "^1.10.0",
+    "express-rate-limit": "^7.1.5",
+    "crypto": "builtin",
+    "form-data": "^4.0.0",
+    "multer": "^1.4.5-lts.1",
+    "pdfkit": "^0.13.0",
+    "docx": "^8.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.6",
+    "@types/express": "^4.17.21",
+    "@types/pg": "^8.11.2",
+    "@types/jest": "^29.5.11",
+    "ts-node": "^10.9.2",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.1.1",
+    "eslint": "^8.56.0",
+    "@typescript-eslint/eslint-plugin": "^6.17.0",
+    "@typescript-eslint/parser": "^6.17.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
