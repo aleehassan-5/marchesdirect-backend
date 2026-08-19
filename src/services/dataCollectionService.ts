@@ -14,72 +14,74 @@ const parser = new Parser();
 
 export const collectBoampData = async (sourceId: number) => {
   const logId = uuid();
-  
+  const startedAt = new Date();
+
   try {
     logger.info(`[BOAMP] Starting collection (log: ${logId})`);
 
-    const endpoint = process.env.BOAMP_API_ENDPOINT || 'https://api.boamp.fr/v1/notices';
+    // Real BOAMP open-data portal (Opendatasoft/DILA) - public dataset, no API key required.
+    // Docs: https://boamp-datadila.opendatasoft.com/explore/dataset/boamp/
+    const endpoint = process.env.BOAMP_API_ENDPOINT || 'https://boamp-datadila.opendatasoft.com/api/records/1.0/search/';
+    // Optional - only needed if a higher-rate-limit / authenticated endpoint is used later.
     const apiKey = process.env.BOAMP_API_KEY;
 
-    if (!apiKey) {
-      throw new Error('BOAMP_API_KEY not configured');
-    }
+    // Fetch data from BOAMP (last 24 hours), sorted by most recent publication first.
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 
-    // Fetch data from BOAMP (last 24 hours)
-    const response = await axios.get(`${endpoint}/search`, {
+    const response = await axios.get(endpoint, {
       params: {
-        api_key: apiKey,
-        published_from: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
-        limit: 1000,
+        dataset: 'boamp',
+        q: `dateparution>=${since}`,
+        sort: '-dateparution',
+        rows: 1000,
+        ...(apiKey ? { apikey: apiKey } : {}),
       },
       timeout: 30000,
     });
 
-    const notices = response.data.results || [];
+    const rawRecords = response.data.records || [];
+    const notices = rawRecords.map(normalizeBoampRecord);
     logger.info(`[BOAMP] Fetched ${notices.length} notices`);
 
     // Process each notice
     let inserted = 0;
     let updated = 0;
-    let duplicates = 0;
     let errors = 0;
 
     for (const notice of notices) {
       try {
         const existing = await db.query(
           'SELECT id FROM opportunities WHERE source_id = $1 AND source_reference = $2',
-          [sourceId, notice.boamp_ref]
+          [sourceId, notice.source_reference]
         );
 
         if (existing.rows.length > 0) {
-          // Update existing
           await updateOpportunity(existing.rows[0].id, notice);
           updated++;
         } else {
-          // Insert new
           await insertOpportunity(sourceId, notice);
           inserted++;
         }
-
-        duplicates += await deduplicateOpportunities();
       } catch (err) {
-        logger.error(`[BOAMP] Error processing notice ${notice.boamp_ref}:`, err);
+        logger.error(`[BOAMP] Error processing notice ${notice.source_reference}:`, err);
         errors++;
       }
     }
 
-    // Log collection
+    // Deduplicate once per batch (cross-source, e.g. BOAMP vs PLACE) - not once per record,
+    // which would rescan the whole opportunities table on every single insert.
+    const duplicates = await deduplicateOpportunities();
+
     await db.query(
       `INSERT INTO connector_logs 
         (source_id, status, records_fetched, records_processed, records_failed, started_at, completed_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [sourceId, 'success', notices.length, inserted + updated, errors, new Date(), new Date()]
+      [sourceId, 'success', notices.length, inserted + updated, errors, startedAt, new Date()]
     );
 
-    // Update next run time
     await db.query(
-      'UPDATE data_sources SET last_run = NOW(), next_run = NOW() + INTERVAL \'6 hours\' WHERE id = $1',
-      [sourceId]
+      "UPDATE data_sources SET last_run = NOW(), next_run = NOW() + INTERVAL '6 hours', total_imports = total_imports + $2 WHERE id = $1",
+      [sourceId, inserted]
     );
 
     logger.info(`[BOAMP] Collection complete: ${inserted} inserted, ${updated} updated, ${duplicates} duplicates merged`);
@@ -92,11 +94,30 @@ export const collectBoampData = async (sourceId: number) => {
       `INSERT INTO connector_logs 
         (source_id, status, error_message, started_at, completed_at)
        VALUES ($1, $2, $3, $4, $5)`,
-      [sourceId, 'failed', String(err), new Date(), new Date()]
+      [sourceId, 'failed', String(err), startedAt, new Date()]
     );
 
+    // Re-throw - scheduleDataCollection() catches this per-source so a BOAMP failure
+    // never blocks PLACE/TED from running.
     throw err;
   }
+};
+
+// Normalize a raw BOAMP record (Opendatasoft "fields" object) into our internal shape.
+const normalizeBoampRecord = (record: any) => {
+  const f = record.fields || {};
+  return {
+    source_reference: record.recordid || f.idweb || f.id,
+    title: f.objet || f.titulaire || 'Sans titre',
+    description: f.objet || f.resume || '',
+    publication_date: f.dateparution || record.record_timestamp,
+    deadline: f.datelimitereponse || null,
+    estimated_value: f.montant ? parseFloat(f.montant) : null,
+    location_city: f.ville_avis || f.nomacheteur || null,
+    location_region: f.region || null,
+    location_department: f.departement || null,
+    raw: record,
+  };
 };
 
 // ============================================================================
@@ -226,11 +247,11 @@ const insertOpportunity = async (sourceId: number, data: any) => {
   const result = await db.query(
     `INSERT INTO opportunities 
       (source_id, source_reference, title, description, publication_date, deadline, 
-       estimated_value, location_city, location_region, opportunity_type_id, 
+       estimated_value, location_city, location_region, location_department, opportunity_type_id, 
        raw_data, ai_classification_status)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
        (SELECT id FROM opportunity_types WHERE code = 'public_procurement'),
-       $10, 'not_analyzed')
+       $11, 'not_analyzed')
      RETURNING id`,
     [
       sourceId,
@@ -242,7 +263,8 @@ const insertOpportunity = async (sourceId: number, data: any) => {
       data.estimated_value,
       data.location_city,
       data.location_region || data.region,
-      JSON.stringify(data), // raw_data
+      data.location_department || null,
+      JSON.stringify(data.raw || data), // raw_data - keep original source payload for audit
     ]
   );
 
@@ -250,7 +272,8 @@ const insertOpportunity = async (sourceId: number, data: any) => {
 };
 
 const updateOpportunity = async (opportunityId: string, data: any) => {
-  // Only update if status changed (active -> expired, etc.)
+  // Only touch fields that legitimately change between runs (deadline extensions, cancellations,
+  // corrected values); title/publication_date/source_reference stay immutable once ingested.
   await db.query(
     `UPDATE opportunities 
      SET description = $1, deadline = $2, estimated_value = $3, raw_data = $4, updated_at = NOW()
@@ -259,7 +282,7 @@ const updateOpportunity = async (opportunityId: string, data: any) => {
       data.description,
       data.deadline,
       data.estimated_value,
-      JSON.stringify(data),
+      JSON.stringify(data.raw || data),
       opportunityId,
     ]
   );
