@@ -9,6 +9,8 @@ export interface AuthRequest extends Request {
     email: string;
     companyId: string;
     role: string;
+    firstName: string;
+    lastName: string;
   };
   company?: any;
 }
@@ -40,12 +42,16 @@ export const authenticate = async (
 
     const user = result.rows[0];
 
-    // Attach user to request
+    // Attach user to request - first/last name were previously dropped here even
+    // though the DB row has them, so GET /api/auth/me (which returns req.user
+    // as-is) could never surface the user's actual name to the frontend.
     req.user = {
       id: user.id,
       email: user.email,
       companyId: user.company_id,
       role: user.role,
+      firstName: user.first_name,
+      lastName: user.last_name,
     };
 
     // Attach company to request
