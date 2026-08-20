@@ -89,6 +89,10 @@ app.use('/api/crm/leads', require('./routes/crmPublic').default);
 
 // Protected routes (require authentication)
 app.use('/api/companies', authenticate, require('./routes/companies').default);
+app.use('/api/uploads', authenticate, require('./routes/uploads').default);
+// Serves files saved by the local-disk storage fallback (storageService.ts).
+// No-op / unused when AWS_S3_BUCKET is configured, since files then live in S3.
+app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 app.use('/api/dashboard', authenticate, require('./routes/dashboard').default);
 app.use('/api/tenders', authenticate, require('./routes/tenders').default);
 app.use('/api/alerts', authenticate, require('./routes/alerts').default);

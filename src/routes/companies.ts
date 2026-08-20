@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { AuthRequest, checkCompanyAccess } from '../middleware/auth';
+import { resolveFileUrl } from '../services/storageService';
 
 const router = Router();
 
@@ -71,7 +72,12 @@ router.get('/me/documents', async (req: AuthRequest, res: Response) => {
       'SELECT * FROM company_documents WHERE company_id = $1 AND deleted_at IS NULL ORDER BY document_type',
       [req.user!.companyId]
     );
-    res.json(result.rows);
+
+    const documentsWithResolvedUrls = await Promise.all(
+      result.rows.map(async (doc) => ({ ...doc, file_url: await resolveFileUrl(doc.file_url) }))
+    );
+
+    res.json(documentsWithResolvedUrls);
   } catch (err: any) {
     logger.error('Documents fetch error:', err);
     res.status(500).json({ error: 'Failed to fetch documents' });

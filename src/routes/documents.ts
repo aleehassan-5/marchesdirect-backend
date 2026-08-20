@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { AuthRequest } from '../middleware/auth';
+import { resolveFileUrl } from '../services/storageService';
 
 const router = Router();
 
@@ -26,7 +27,11 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       [req.user!.companyId]
     );
 
-    res.json(result.rows);
+    const withResolvedUrls = await Promise.all(
+      result.rows.map(async (doc) => ({ ...doc, file_url: await resolveFileUrl(doc.file_url) }))
+    );
+
+    res.json(withResolvedUrls);
   } catch (err: any) {
     logger.error('Documents list error:', err);
     res.status(500).json({ error: 'Failed to fetch documents' });

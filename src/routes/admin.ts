@@ -2,7 +2,7 @@ import { Router, Response } from 'express';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { AuthRequest, requireRole } from '../middleware/auth';
-import { verifyDeduplicationQuality, getDeduplicationReport } from '../services/deduplicationService';
+import { verifyDeduplicationQuality, getDeduplicationReport, deduplicateOpportunities } from '../services/deduplicationService';
 import { classifyUnanalyzedOpportunities, generateSummariesForOpportunities } from '../services/aiService';
 import { collectBoampData, collectPlaceData, collectTedData } from '../services/dataCollectionService';
 
@@ -62,6 +62,18 @@ router.post('/data-sources/:code/run', async (req: AuthRequest, res: Response) =
       error: 'Connector run failed - see connector_logs for the recorded failure',
       detail: String(err?.message || err),
     });
+  }
+});
+
+// POST /api/admin/deduplication/run - trigger the dedup sweep independently of
+// a full data collection run (useful for ops/testing without re-fetching sources)
+router.post('/deduplication/run', async (req: AuthRequest, res: Response) => {
+  try {
+    const merged = await deduplicateOpportunities();
+    res.json({ merged });
+  } catch (err: any) {
+    logger.error('Admin dedup run error:', err);
+    res.status(500).json({ error: 'Deduplication run failed' });
   }
 });
 
