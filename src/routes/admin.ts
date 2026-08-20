@@ -4,6 +4,7 @@ import { logger } from '../utils/logger';
 import { AuthRequest, requireRole } from '../middleware/auth';
 import { verifyDeduplicationQuality, getDeduplicationReport } from '../services/deduplicationService';
 import { classifyUnanalyzedOpportunities, generateSummariesForOpportunities } from '../services/aiService';
+import { collectBoampData, collectPlaceData, collectTedData } from '../services/dataCollectionService';
 
 const router = Router();
 
@@ -21,6 +22,46 @@ router.get('/data-sources', async (req: AuthRequest, res: Response) => {
   } catch (err: any) {
     logger.error('Admin data-sources error:', err);
     res.status(500).json({ error: 'Failed to fetch data sources' });
+  }
+});
+
+// POST /api/admin/data-sources/:code/run - manually trigger one connector run on demand.
+// This is what makes Milestone 2/3's proof ("3 automatic runs observed", "second import
+// with zero duplicates") demonstrable on a short call instead of waiting on the 6-hour
+// cron schedule - trigger it, then trigger it again, and read connector_logs /
+// deduplication/report before and after.
+router.post('/data-sources/:code/run', async (req: AuthRequest, res: Response) => {
+  try {
+    const sourceResult = await db.query('SELECT * FROM data_sources WHERE code = $1', [req.params.code]);
+
+    if (sourceResult.rows.length === 0) {
+      return res.status(404).json({ error: `Unknown data source code: ${req.params.code}` });
+    }
+
+    const source = sourceResult.rows[0];
+
+    let result;
+    switch (source.code) {
+      case 'boamp':
+        result = await collectBoampData(source.id);
+        break;
+      case 'place':
+        result = await collectPlaceData(source.id);
+        break;
+      case 'ted':
+        result = await collectTedData(source.id);
+        break;
+      default:
+        return res.status(400).json({ error: `No connector implemented for source code: ${source.code}` });
+    }
+
+    res.json({ source: source.code, result });
+  } catch (err: any) {
+    logger.error(`Manual connector run error (${req.params.code}):`, err);
+    res.status(502).json({
+      error: 'Connector run failed - see connector_logs for the recorded failure',
+      detail: String(err?.message || err),
+    });
   }
 });
 
