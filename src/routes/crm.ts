@@ -4,9 +4,10 @@ import { logger } from '../utils/logger';
 
 const router = Router();
 
-// NOTE: this router is mounted behind `authenticate` in server.ts, which fits
-// admin/staff reviewing captured leads. If public marketing pages need to submit
-// leads without login, add a separate public route in server.ts before this one.
+// This router is mounted behind `authenticate` in server.ts (admin/staff use).
+// Public lead capture (POST) lives in routes/crmPublic.ts instead, since
+// anonymous marketing-page visitors submitting the contact/pricing form don't
+// have an account yet.
 
 // GET /api/crm/leads - list captured leads (admin/staff)
 router.get('/leads', async (req: Request, res: Response) => {
@@ -40,37 +41,6 @@ router.get('/leads', async (req: Request, res: Response) => {
   } catch (err: any) {
     logger.error('CRM leads list error:', err);
     res.status(500).json({ error: 'Failed to fetch leads' });
-  }
-});
-
-// POST /api/crm/leads - capture a new lead
-router.post('/leads', async (req: Request, res: Response) => {
-  try {
-    const {
-      brandId, firstName, lastName, email, phone, companyName,
-      industryTrade, locationCity, locationRegion, leadSource,
-    } = req.body;
-
-    if (!brandId || !email) {
-      return res.status(400).json({ error: 'brandId and email are required' });
-    }
-
-    const result = await db.query(
-      `INSERT INTO crm_leads
-        (brand_id, first_name, last_name, email, phone, company_name, industry_trade,
-         location_city, location_region, lead_source, crm_sync_status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending')
-       RETURNING *`,
-      [
-        brandId, firstName, lastName, email, phone, companyName,
-        industryTrade, locationCity, locationRegion, leadSource || 'signup',
-      ]
-    );
-
-    res.status(201).json(result.rows[0]);
-  } catch (err: any) {
-    logger.error('CRM lead capture error:', err);
-    res.status(500).json({ error: 'Failed to capture lead' });
   }
 });
 

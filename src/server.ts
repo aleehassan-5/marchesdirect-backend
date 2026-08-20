@@ -51,6 +51,13 @@ app.use('/api/auth/register', authLimiter);
 app.use(morgan('combined', { stream: { write: msg => logger.info(msg.trim()) } }));
 
 // Body parsing
+// IMPORTANT: the Stripe webhook route needs the raw, unparsed request body to
+// verify the webhook signature (stripe.webhooks.constructEvent). It must get
+// express.raw() BEFORE the global express.json() below runs, or Stripe's
+// signature check will always fail (a JSON-reparsed body has different bytes
+// than what Stripe originally signed) - this previously broke the whole
+// webhook silently, since every webhook call would 400 with "Webhook error".
+app.use('/api/subscriptions/webhook', express.raw({ type: 'application/json' }));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
@@ -75,6 +82,10 @@ app.use('/api/auth', require('./routes/auth').default);
 app.use('/api/opportunities', require('./routes/opportunities').default);
 app.use('/api/trades', require('./routes/trades').default);
 app.use('/api/subscriptions', require('./routes/subscriptions').default);
+// CRM lead capture must be public: it's submitted from anonymous marketing
+// pages (pricing page, contact form) before someone has an account.
+// Admin viewing/managing of captured leads stays behind authenticate below.
+app.use('/api/crm/leads', require('./routes/crmPublic').default);
 
 // Protected routes (require authentication)
 app.use('/api/companies', authenticate, require('./routes/companies').default);

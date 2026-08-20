@@ -2,27 +2,25 @@ import PDFDocument from 'pdfkit';
 import archiver from 'archiver';
 import { PassThrough } from 'stream';
 import { logger } from '../utils/logger';
+import { generateDC1, generateDC2, generateDUMESummary, DC2References } from './cerfaFormService';
 
 // ============================================================================
 // DOCUMENT GENERATION (MILESTONE 9)
 // ============================================================================
 //
 // Turns the bid_responses text fields (already populated in tenders.ts from the
-// company's own profile data) into real downloadable PDF files, bundled as a
+// company's own profile data) into real downloadable files, bundled as a
 // single ZIP - matching the acceptance criteria in Payment_Terms_v1_2.
 //
-// IMPORTANT - what this does NOT do yet:
-// DC1, DC2 and DUME are official French government forms (Cerfa n°15905*xx,
-// 15906*xx, and the DUME XML/PDF format published on marches-publics.gouv.fr).
-// Correctly reproducing their exact official layout requires downloading the
-// real fillable templates from service-public.fr/entreprises and filling their
-// actual form fields (e.g. with pdf-lib) - not reconstructing them from memory,
-// since a wrong field layout on a real administrative form is a compliance risk,
-// not just a cosmetic bug. Until those templates are sourced, this generates a
-// clearly-labelled "DC1/DC2/DUME - administrative summary" PDF containing the
-// same structured data (company identity, references, declarations) ready to be
-// transposed into the official forms by hand, or by pdf-lib once the templates
-// are added.
+// DC1 / DC2 / DUME: the official government forms (economie.gouv.fr/daj) are
+// distributed as Word templates, not fillable PDFs - there is no official
+// Cerfa-numbered fillable PDF for DC1/DC2 to fill with pdf-lib. cerfaFormService
+// reproduces their exact section structure (verified against the official
+// notices explicatives) as real .docx files instead - the same format the
+// government itself distributes. DUME has no static template at all (it's a
+// live EU/French online service); its fixed Part I-VI structure per EU
+// Implementing Regulation 2016/7 is reproduced the same way, for manual
+// transposition into the official online tool.
 
 function textToPdfBuffer(title: string, body: string): Promise<Buffer> {
   return new Promise((resolve, reject) => {
@@ -85,37 +83,46 @@ function pricingScheduleToPdfBuffer(
 }
 
 export type BidPackageInput = {
-  companyName: string;
+  company: {
+    name: string;
+    legal_form?: string | null;
+    siret?: string | null;
+    address_street?: string | null;
+    address_city?: string | null;
+    address_postal_code?: string | null;
+    email: string;
+    phone?: string | null;
+    employee_count?: number | null;
+    annual_revenue?: number | null;
+    founding_year?: number | null;
+  };
+  buyer: {
+    name?: string | null;
+    reference?: string | null;
+    title: string;
+    lotDescription?: string | null;
+  };
+  references: DC2References;
   technicalMemoText: string;
   engagementActText: string;
   pricingSchedule: Array<{ label: string; quantity?: number; unit?: string; unit_price?: number }>;
   missingDocuments: string[];
-  opportunityTitle: string;
 };
 
 /**
  * Generate the full bid package (technical memo, engagement act, pricing schedule,
- * DC1/DC2/DUME administrative summary) as real PDFs and bundle them into one ZIP.
- * Returns the ZIP as a Buffer - caller decides whether to upload to S3 or stream
- * it directly to the client.
+ * and real DC1/DC2/DUME documents matching the official government structure) and
+ * bundle them into one ZIP. Returns the ZIP as a Buffer - caller decides whether to
+ * upload to S3 or stream it directly to the client.
  */
 export async function generateBidPackageZip(input: BidPackageInput): Promise<Buffer> {
-  const [technicalMemoPdf, engagementActPdf, pricingSchedulePdf, adminSummaryPdf] = await Promise.all([
+  const [technicalMemoPdf, engagementActPdf, pricingSchedulePdf, dc1Docx, dc2Docx, dumeDocx] = await Promise.all([
     textToPdfBuffer('MEMOIRE TECHNIQUE', input.technicalMemoText),
     textToPdfBuffer("ACTE D'ENGAGEMENT", input.engagementActText),
-    pricingScheduleToPdfBuffer(input.companyName, input.pricingSchedule),
-    textToPdfBuffer(
-      'DC1 / DC2 / DUME - Synthese administrative',
-      `Entreprise: ${input.companyName}\nAppel d'offres: ${input.opportunityTitle}\n\n` +
-        `Ce document reprend les informations administratives issues du profil entreprise ` +
-        `(identite, references, declarations sur l'honneur) a reporter dans les formulaires ` +
-        `officiels Cerfa DC1/DC2 et le DUME (marches-publics.gouv.fr). Les gabarits officiels ` +
-        `de ces formulaires n'etant pas encore integres au systeme, cette synthese sert de ` +
-        `brouillon a transposer manuellement pour cette phase.\n\n` +
-        (input.missingDocuments.length
-          ? `PIECES MANQUANTES A FOURNIR AVANT SOUMISSION:\n- ${input.missingDocuments.join('\n- ')}`
-          : 'Toutes les pieces obligatoires sont presentes dans le profil entreprise.')
-    ),
+    pricingScheduleToPdfBuffer(input.company.name, input.pricingSchedule),
+    generateDC1(input.company, input.buyer),
+    generateDC2(input.company, input.buyer, input.references),
+    generateDUMESummary(input.company, input.buyer),
   ]);
 
   return new Promise((resolve, reject) => {
@@ -132,7 +139,18 @@ export async function generateBidPackageZip(input: BidPackageInput): Promise<Buf
     archive.append(technicalMemoPdf, { name: '01-memoire-technique.pdf' });
     archive.append(engagementActPdf, { name: "02-acte-engagement.pdf" });
     archive.append(pricingSchedulePdf, { name: '03-bordereau-prix-unitaires.pdf' });
-    archive.append(adminSummaryPdf, { name: '04-dc1-dc2-dume-synthese.pdf' });
+    archive.append(dc1Docx as Buffer, { name: '04-DC1-lettre-candidature.docx' });
+    archive.append(dc2Docx as Buffer, { name: '05-DC2-declaration-candidat.docx' });
+    archive.append(dumeDocx as Buffer, { name: '06-DUME-synthese.docx' });
+
+    if (input.missingDocuments.length > 0) {
+      const missingNote = Buffer.from(
+        `PIECES MANQUANTES A FOURNIR AVANT SOUMISSION (depuis le profil entreprise):\n\n- ${input.missingDocuments.join('\n- ')}`,
+        'utf-8'
+      );
+      archive.append(missingNote, { name: '00-PIECES-MANQUANTES.txt' });
+    }
+
     archive.finalize();
   });
 }

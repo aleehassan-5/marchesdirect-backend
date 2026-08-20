@@ -233,7 +233,9 @@ router.post('/bid/:bidId/generate', async (req: AuthRequest, res: Response) => {
 router.get('/bid/:bidId/package', async (req: AuthRequest, res: Response) => {
   try {
     const bidResult = await db.query(
-      `SELECT br.*, o.title as opportunity_title FROM bid_responses br
+      `SELECT br.*, o.title as opportunity_title, o.source_reference,
+              COALESCE(o.raw_data->>'nomacheteur', o.raw_data->>'acheteur', o.location_city) as buyer_name
+       FROM bid_responses br
        JOIN tenders t ON br.tender_id = t.id
        JOIN opportunities o ON t.opportunity_id = o.id
        WHERE br.id = $1 AND br.company_id = $2`,
@@ -252,15 +254,38 @@ router.get('/bid/:bidId/package', async (req: AuthRequest, res: Response) => {
       });
     }
 
-    const companyResult = await db.query('SELECT name FROM companies WHERE id = $1', [req.user!.companyId]);
+    const [companyResult, referencesResult] = await Promise.all([
+      db.query(
+        `SELECT name, legal_form, siret, address_street, address_city, address_postal_code,
+                email, phone, employee_count, annual_revenue, founding_year
+         FROM companies WHERE id = $1`,
+        [req.user!.companyId]
+      ),
+      db.query(
+        `SELECT project_name, client_name, contract_value, completion_date
+         FROM company_references WHERE company_id = $1 ORDER BY completion_date DESC LIMIT 5`,
+        [req.user!.companyId]
+      ),
+    ]);
+
+    const company = companyResult.rows[0];
+    if (!company) {
+      return res.status(400).json({ error: 'Company profile not found - complete your profile first' });
+    }
 
     const zip = await generateBidPackageZip({
-      companyName: companyResult.rows[0]?.name || 'Entreprise',
+      company,
+      buyer: {
+        name: bid.buyer_name,
+        reference: bid.source_reference,
+        title: bid.opportunity_title,
+        lotDescription: null,
+      },
+      references: referencesResult.rows,
       technicalMemoText: bid.technical_memo_text,
       engagementActText: bid.engagement_act_text,
       pricingSchedule: bid.pricing_schedule_json || [],
       missingDocuments: bid.missing_documents || [],
-      opportunityTitle: bid.opportunity_title,
     });
 
     const key = `bid-packages/${req.user!.companyId}/${bid.id}.zip`;
