@@ -147,6 +147,9 @@ CREATE TABLE opportunities (
   -- Matching & Recommendations (Milestone 6)
   ai_summary_status VARCHAR(50),            -- 'not_generated', 'processing', 'generated', 'failed'
   ai_summary TEXT,                          -- Auto-generated summary
+  ai_extracted_facts JSONB,                 -- Structured fact extraction (POC test): each field
+                                             -- {"value": "...", "available": bool} - "not available"
+                                             -- when the source record doesn't actually contain it.
   
   -- Audit
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

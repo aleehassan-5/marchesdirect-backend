@@ -15,12 +15,22 @@ classification, intelligent matching, and multi-tenant architecture.
 | Auth (`authService.ts`), routes wired | Written, not yet exercised against a live DB |
 | BOAMP/PLACE/TED connectors (M2), dedup (M3) | Written, no live run with the required 3 automatic executions demonstrated yet |
 | AI classification/matching/summaries (M6-7) | Written (`aiService.ts`), no live-data test or chatbot accuracy benchmark run yet |
+| DCE analysis - selection criteria/required docs/scoring (M6.1/M9) | Written (`aiService.analyzeTenderDocuments`, `POST /api/tenders/:id/analyze`); reads the connector's already-ingested title/description/raw_data, does NOT yet parse RC/CCAP/CCTP PDF files directly (connectors don't download those files today - separate task). No live run yet. |
+| AI technical memo generator, 6-section (M6.4/M9) | Written (`aiService.generateTechnicalMemo`), now pulls company_resources (staff/equipment) and all 3 policy types (quality/safety/environmental) that the previous plain-template version ignored; falls back to a deterministic grounded template if the Claude API call fails. No live run yet. |
+| Structured fact extraction with explicit "not available" (POC test spec) | Written (`aiService.extractOpportunityFacts`, `POST /api/opportunities/:id/extract-facts`); requires the `ai_extracted_facts` column added to `schema.sql` in this pass - re-run schema.sql (or the one new `ALTER TABLE` if the DB already exists) before using it. No live run yet. |
 | Documents / S3 (M9) | Written, S3 not configured/tested |
 | Stripe billing, CRM export (M8) | Routes exist (`subscriptions.ts`, `crm.ts`); Stripe/CRM API calls not wired to real accounts |
 | `scripts/migrate.js`, `scripts/seed.js` | Referenced in `package.json`, **do not exist yet** - load `schema.sql` manually for now |
 
 This section exists so the README doesn't silently drift from reality again -
 please update the table (not just the code) when a row's status changes.
+
+> **Note on "no live run yet" above:** everything in this pass was written and
+> type-checked (`tsc --noEmit` clean) in a sandboxed environment with no
+> network access to BOAMP, a real Postgres instance, or the Anthropic API with
+> a funded key - so none of it could be executed end-to-end from here. It
+> needs to be run once against a real database and a real `ANTHROPIC_API_KEY`
+> before treating any of these rows as done for milestone/proof purposes.
 
 ---
 

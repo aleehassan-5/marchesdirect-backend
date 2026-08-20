@@ -3,8 +3,36 @@ import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { AuthRequest } from '../middleware/auth';
 import { generateBidPackageZip, uploadToS3IfConfigured } from '../services/documentService';
+import { analyzeTenderDocuments, generateTechnicalMemo } from '../services/aiService';
 
 const router = Router();
+
+// POST /api/tenders/:tenderId/analyze - run DCE analysis (selection criteria, required
+// documents, scoring weights, complexity) via AI - Milestone 6.1. Not company-scoped:
+// a tender's DCE analysis is shared across every company bidding on it.
+router.post('/:tenderId/analyze', async (req: AuthRequest, res: Response) => {
+  try {
+    const tenderResult = await db.query('SELECT id FROM tenders WHERE id = $1', [req.params.tenderId]);
+    if (tenderResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Tender not found' });
+    }
+
+    const success = await analyzeTenderDocuments(req.params.tenderId);
+    const updated = await db.query('SELECT * FROM tenders WHERE id = $1', [req.params.tenderId]);
+
+    if (!success) {
+      return res.status(502).json({
+        error: 'DCE analysis failed - see tender.dce_analysis_status',
+        tender: updated.rows[0],
+      });
+    }
+
+    res.json(updated.rows[0]);
+  } catch (err: any) {
+    logger.error('DCE analysis route error:', err);
+    res.status(500).json({ error: 'Failed to analyze tender documents' });
+  }
+});
 
 // GET /api/tenders/bids/mine - list all bid responses for the logged-in company
 router.get('/bids/mine', async (req: AuthRequest, res: Response) => {

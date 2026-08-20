@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
-import { classifyOpportunity, generateOpportunitySummary } from '../services/aiService';
+import { classifyOpportunity, generateOpportunitySummary, extractOpportunityFacts } from '../services/aiService';
 import { optionalAuth, AuthRequest } from '../middleware/auth';
 
 const router = Router();
@@ -149,6 +149,18 @@ router.post('/:id/summarize', async (req: Request, res: Response) => {
   } catch (err: any) {
     logger.error('Manual summarize error:', err);
     res.status(500).json({ error: 'Summary generation failed' });
+  }
+});
+
+// POST /api/opportunities/:id/extract-facts - structured fact extraction with explicit
+// "not available" on missing fields (technical POC test acceptance criteria).
+router.post('/:id/extract-facts', async (req: Request, res: Response) => {
+  try {
+    const facts = await extractOpportunityFacts(req.params.id);
+    res.json({ facts });
+  } catch (err: any) {
+    logger.error('Fact extraction error:', err);
+    res.status(500).json({ error: 'Fact extraction failed' });
   }
 });
 

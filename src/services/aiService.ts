@@ -54,6 +54,373 @@ const callClaudeAPI = async (
 };
 
 // ============================================================================
+// DCE ANALYSIS - TENDER DOCUMENT EXTRACTION (MILESTONE 6.1 / 9.1)
+// ============================================================================
+// Extracts selection criteria, required documents, scoring weights and
+// complexity from the tender's own record (title/description/raw_data as
+// currently ingested from the source connector). This intentionally does NOT
+// yet parse the actual RC/CCAP/CCTP PDF files referenced in section 6.1 of the
+// Technical Requirements - the connectors only ingest structured metadata
+// today, not the documents themselves. Downloading and OCR/text-extracting
+// those PDFs is a separate, larger connector-side task. Until that exists,
+// this analyzes the richest text already available per opportunity and is
+// honest about the gap via `source_completeness` in its own output rather
+// than pretending to have read documents it was never given.
+export const analyzeTenderDocuments = async (tenderId: string): Promise<boolean> => {
+  try {
+    const tenderResult = await db.query(
+      `SELECT t.*, o.title, o.description, o.raw_data, o.estimated_value,
+              o.deadline, o.contract_type, o.currency
+       FROM tenders t
+       JOIN opportunities o ON t.opportunity_id = o.id
+       WHERE t.id = $1`,
+      [tenderId]
+    );
+
+    if (tenderResult.rows.length === 0) {
+      throw new Error(`Tender ${tenderId} not found`);
+    }
+
+    const tender = tenderResult.rows[0];
+
+    await db.query('UPDATE tenders SET dce_analysis_status = $1 WHERE id = $2', ['processing', tenderId]);
+
+    const systemPrompt = `You are a French public procurement expert analyzing a tender's consultation file
+(dossier de consultation des entreprises - DCE: reglement de consultation, CCAP, CCTP).
+
+Extract, strictly from the text given to you (never invent numbers or requirements that are not present):
+1. Selection criteria and their weighting if stated (e.g. "Critere prix: 40%, Critere valeur technique: 45%, Critere delais: 15%").
+2. The standard set of administrative documents a French company must supply for a public tender of this type
+   (DC1, DC2 or DUME, insurance certificates, tax/social security compliance, KBIS, etc.) plus any tender-specific
+   document mentioned in the text.
+3. Scoring weights, if explicitly stated - mirror the selection criteria weights; do not fabricate a breakdown
+   that isn't in the source text.
+4. A complexity level (low, medium, high) based on contract value, technical scope and document volume.
+5. A rough estimated effort in hours to prepare a complete bid response.
+
+If the source text does not state exact weighting/criteria, return them with "not_specified": true rather than
+guessing numbers - the platform must never invent facts that aren't in the source (see acceptance criteria).
+
+Return ONLY valid JSON in this exact shape, no markdown, no extra text:
+{
+  "selection_criteria": [{"label": "...", "weight_percent": 40, "not_specified": false}],
+  "required_documents": ["DC1", "DC2", "Attestation d'assurance decennale", ...],
+  "scoring_weights": {"price": 40, "technical_value": 45, "deadline": 15, "not_specified": false},
+  "complexity_assessment": "medium",
+  "estimated_effort_hours": 12,
+  "source_completeness": "structured_metadata_only"
+}`;
+
+    const userMessage = `Title: ${tender.title}
+Description: ${tender.description || 'Not provided by source'}
+Contract type: ${tender.contract_type || 'Not specified'}
+Estimated value: ${tender.estimated_value ? `${tender.estimated_value} ${tender.currency || 'EUR'}` : 'Not specified'}
+Deadline: ${tender.deadline || 'Not specified'}
+Additional source data: ${tender.raw_data ? JSON.stringify(tender.raw_data).substring(0, 1500) : 'None'}`;
+
+    const response = await callClaudeAPI([{ role: 'user', content: userMessage }], systemPrompt, 1500);
+
+    let analysis;
+    try {
+      analysis = JSON.parse(response);
+    } catch (err) {
+      logger.warn(`Failed to parse DCE analysis response for tender ${tenderId}`);
+      throw new Error('Invalid DCE analysis response format');
+    }
+
+    await db.query(
+      `UPDATE tenders SET
+         dce_analysis_status = $1,
+         selection_criteria = $2,
+         required_documents = $3,
+         scoring_weights = $4,
+         complexity_assessment = $5,
+         estimated_effort_hours = $6,
+         updated_at = NOW()
+       WHERE id = $7`,
+      [
+        'analyzed',
+        JSON.stringify(analysis.selection_criteria || []),
+        JSON.stringify(analysis.required_documents || []),
+        JSON.stringify(analysis.scoring_weights || {}),
+        analysis.complexity_assessment || 'medium',
+        analysis.estimated_effort_hours || null,
+        tenderId,
+      ]
+    );
+
+    logger.info(`✅ Analyzed DCE for tender ${tenderId}`);
+    return true;
+  } catch (err) {
+    logger.error(`DCE analysis failed for tender ${tenderId}:`, err);
+    await db.query('UPDATE tenders SET dce_analysis_status = $1 WHERE id = $2', ['failed', tenderId]);
+    return false;
+  }
+};
+
+// ============================================================================
+// AI-ASSISTED TECHNICAL MEMO GENERATOR (MILESTONE 6.4 / 9)
+// ============================================================================
+// Builds the 6-section memoire technique described in section 6.4 of the
+// Technical Requirements, grounded in the company's own profile data
+// (references, resources, policies) plus the tender's description and DCE
+// analysis. Falls back to a deterministic, still-grounded template (no AI
+// wording, but same real data) if the Claude API call fails or no API key is
+// configured, so bid preparation never hard-blocks on AI availability.
+type TechnicalMemoResult = { text: string; aiGenerated: boolean };
+
+export const generateTechnicalMemo = async (bidId: string): Promise<TechnicalMemoResult> => {
+  const bidResult = await db.query(
+    `SELECT br.*, t.id as tender_id, t.selection_criteria, t.complexity_assessment,
+            o.id as opportunity_id, o.title as opportunity_title, o.description as opportunity_description,
+            o.contract_type
+     FROM bid_responses br
+     JOIN tenders t ON br.tender_id = t.id
+     JOIN opportunities o ON t.opportunity_id = o.id
+     WHERE br.id = $1`,
+    [bidId]
+  );
+
+  if (bidResult.rows.length === 0) {
+    throw new Error(`Bid response ${bidId} not found`);
+  }
+
+  const bid = bidResult.rows[0];
+
+  const [companyResult, referencesResult, resourcesResult, policiesResult] = await Promise.all([
+    db.query('SELECT * FROM companies WHERE id = $1', [bid.company_id]),
+    db.query(
+      'SELECT * FROM company_references WHERE company_id = $1 ORDER BY completion_date DESC LIMIT 20',
+      [bid.company_id]
+    ),
+    db.query('SELECT * FROM company_resources WHERE company_id = $1', [bid.company_id]),
+    db.query('SELECT * FROM company_policies WHERE company_id = $1', [bid.company_id]),
+  ]);
+
+  const company = companyResult.rows[0];
+  const references = referencesResult.rows;
+  const resources = resourcesResult.rows;
+  const policies = policiesResult.rows;
+
+  const fallback = buildFallbackTechnicalMemo(company, references, resources, policies, bid);
+
+  try {
+    const systemPrompt = `You are drafting a "memoire technique" (technical memo) for a French company responding to a
+public tender, strictly from the company data and tender description provided below. This is a first draft the
+company will review and edit before submission - it is not the final submission.
+
+RULES (hard requirements):
+- Never invent facts: company data, references, certifications, staff/equipment numbers, or tender requirements
+  that are not present in the input. If something relevant is missing, write "Non renseigne dans le profil
+  entreprise" for that item instead of making it up.
+- From the company's reference list, select and describe only the ones most relevant to this specific tender
+  (by trade/contract type match), not simply the most recent ones.
+- Write in French, professional register, suitable for a public buyer.
+
+Produce exactly these 6 sections, each with a clear header, in this order:
+1. PRESENTATION DE L'ENTREPRISE ET ORGANISATION - tailored to this contract's purpose, not generic boilerplate.
+2. MOYENS HUMAINS ET MATERIELS AFFECTES AU PROJET - drawn only from the staff/equipment resources given.
+3. METHODOLOGIE D'EXECUTION ET PHASAGE - proposed approach derived from the tender description; if the
+   description doesn't detail technical phases, keep this section proportionate to what's actually known and say
+   so rather than inventing a phasing plan.
+4. PLANNING PREVISIONNEL - a preliminary schedule outline, explicitly marked as indicative, based on any
+   deadline/duration info given; do not invent specific dates that weren't provided.
+5. REFERENCES SIMILAIRES - the selected relevant references only, with project name, client, date and a one-line
+   relevance note.
+6. MESURES QUALITE, SECURITE, ENVIRONNEMENT - drawn only from the company's quality/safety/environmental
+   policy text given; note explicitly if one of the three is not documented in the profile.
+
+Return plain text with the 6 numbered section headers as shown above, no markdown formatting, no extra commentary.`;
+
+    const userMessage = `TENDER:
+Title: ${bid.opportunity_title}
+Contract type: ${bid.contract_type || 'Not specified'}
+Description: ${bid.opportunity_description || 'Not provided by source'}
+Complexity (from DCE analysis): ${bid.complexity_assessment || 'not analyzed yet'}
+Selection criteria (from DCE analysis): ${bid.selection_criteria ? JSON.stringify(bid.selection_criteria) : 'not analyzed yet'}
+
+COMPANY PROFILE:
+Name: ${company.name}
+SIRET: ${company.siret || 'non renseigne'}
+Legal form: ${company.legal_form || 'non renseigne'}
+Employee count: ${company.employee_count ?? 'non renseigne'}
+Industry sector: ${company.industry_sector || 'non renseigne'}
+Founded: ${company.founding_year || 'non renseigne'}
+
+STAFF / EQUIPMENT RESOURCES (company_resources):
+${resources.length ? resources.map((r) => `- [${r.resource_type}] ${r.name}${r.quantity ? ` x${r.quantity}` : ''}${r.category ? ` (${r.category})` : ''}${r.description ? ` - ${r.description}` : ''}`).join('\n') : 'Aucune ressource enregistree dans le profil entreprise.'}
+
+REFERENCES (company_references, up to 20, select the most relevant to this tender):
+${references.length ? references.map((r) => `- ${r.project_name} | client: ${r.client_name || 'confidentiel'} | date: ${r.completion_date || 'non renseignee'} | montant: ${r.contract_value || 'non renseigne'} | description: ${r.description || ''}`).join('\n') : 'Aucune reference enregistree dans le profil entreprise.'}
+
+POLICIES (company_policies):
+${policies.length ? policies.map((p) => `- [${p.policy_type}] ${p.policy_text}`).join('\n') : 'Aucune politique enregistree dans le profil entreprise.'}`;
+
+    const memoText = await callClaudeAPI([{ role: 'user', content: userMessage }], systemPrompt, 3000);
+
+    await db.query(
+      `UPDATE bid_responses SET
+         technical_memo_text = $1,
+         technical_memo_version = technical_memo_version + 1,
+         updated_at = NOW()
+       WHERE id = $2`,
+      [memoText, bidId]
+    );
+
+    logger.info(`✅ AI-generated technical memo for bid ${bidId}`);
+    return { text: memoText, aiGenerated: true };
+  } catch (err) {
+    logger.warn(`AI technical memo generation failed for bid ${bidId}, using grounded fallback template:`, err);
+
+    await db.query(
+      `UPDATE bid_responses SET
+         technical_memo_text = $1,
+         technical_memo_version = technical_memo_version + 1,
+         updated_at = NOW()
+       WHERE id = $2`,
+      [fallback, bidId]
+    );
+
+    return { text: fallback, aiGenerated: false };
+  }
+};
+
+// Deterministic, no-AI text covering the same 6 sections from real profile data only.
+// Used when the Claude API is unavailable, so document generation never hard-fails.
+function buildFallbackTechnicalMemo(
+  company: any,
+  references: any[],
+  resources: any[],
+  policies: any[],
+  bid: any
+): string {
+  const staffLines = resources.filter((r) => r.resource_type === 'staff');
+  const equipmentLines = resources.filter((r) => r.resource_type === 'equipment');
+  const facilityLines = resources.filter((r) => r.resource_type === 'facility');
+
+  const resourceBlock = (label: string, rows: any[]) =>
+    rows.length
+      ? `${label}:\n${rows.map((r) => `- ${r.name}${r.quantity ? ` x${r.quantity}` : ''}${r.description ? ` - ${r.description}` : ''}`).join('\n')}`
+      : `${label}: non renseigne dans le profil entreprise.`;
+
+  const referencesBlock = references.length
+    ? references
+        .slice(0, 5)
+        .map((r) => `- ${r.project_name} (${r.client_name || 'client confidentiel'}, ${r.completion_date || 'date non renseignee'})`)
+        .join('\n')
+    : 'Aucune reference enregistree dans le profil entreprise.';
+
+  const qualityPolicy = policies.find((p) => p.policy_type === 'quality');
+  const safetyPolicy = policies.find((p) => p.policy_type === 'safety');
+  const envPolicy = policies.find((p) => p.policy_type === 'environmental');
+
+  return `1. PRESENTATION DE L'ENTREPRISE ET ORGANISATION
+Entreprise: ${company.name}
+SIRET: ${company.siret || 'non renseigne'}
+Forme juridique: ${company.legal_form || 'non renseignee'}
+Effectif: ${company.employee_count ?? 'non renseigne'}
+Secteur: ${company.industry_sector || 'non renseigne'}
+
+2. MOYENS HUMAINS ET MATERIELS AFFECTES AU PROJET
+${resourceBlock('Personnel', staffLines)}
+${resourceBlock('Materiel', equipmentLines)}
+${resourceBlock('Installations', facilityLines)}
+
+3. METHODOLOGIE D'EXECUTION ET PHASAGE
+A completer par l'entreprise sur la base du CCTP du present appel d'offres (${bid.opportunity_title}).
+Non genere automatiquement: la description ingeree pour ce marche ne suffit pas a deduire un phasage technique fiable sans invention de donnees.
+
+4. PLANNING PREVISIONNEL
+Planning indicatif a etablir en fonction de la date limite du marche. Non renseigne automatiquement pour eviter toute date inventee.
+
+5. REFERENCES SIMILAIRES
+${referencesBlock}
+
+6. MESURES QUALITE, SECURITE, ENVIRONNEMENT
+Qualite: ${qualityPolicy?.policy_text || 'non renseignee dans le profil entreprise.'}
+Securite: ${safetyPolicy?.policy_text || 'non renseignee dans le profil entreprise.'}
+Environnement: ${envPolicy?.policy_text || 'non renseignee dans le profil entreprise.'}`;
+}
+
+// ============================================================================
+// STRUCTURED FACT EXTRACTION — "NOT AVAILABLE" ON MISSING DATA (POC TEST SPEC)
+// ============================================================================
+// This is the specific check the client's technical test asks for: pull
+// structured facts out of one record, and for every field the source data
+// doesn't actually contain, return "not available" rather than letting the
+// model guess. Distinct from classifyOpportunity() (which assigns trade/CPV
+// with confidence scores) - this is a plain extraction pass over the raw
+// source record, kept intentionally separate so extraction failures never
+// silently corrupt the classification pipeline.
+export type ExtractedFact = { value: string; available: boolean };
+export type ExtractedOpportunityFacts = {
+  buyer_name: ExtractedFact;
+  contract_object: ExtractedFact;
+  procedure_type: ExtractedFact;
+  submission_deadline: ExtractedFact;
+  estimated_value: ExtractedFact;
+  contact_email: ExtractedFact;
+  required_qualifications: ExtractedFact;
+};
+
+export const extractOpportunityFacts = async (
+  opportunityId: string
+): Promise<ExtractedOpportunityFacts> => {
+  const oppResult = await db.query('SELECT * FROM opportunities WHERE id = $1', [opportunityId]);
+
+  if (oppResult.rows.length === 0) {
+    throw new Error(`Opportunity ${opportunityId} not found`);
+  }
+
+  const opp = oppResult.rows[0];
+
+  const systemPrompt = `You extract structured facts from a single French public procurement notice.
+
+HARD RULE: for every field, only use what is literally present in the source text/data given below.
+If a field is not present in the source, you MUST return {"value": "not available", "available": false}
+for it - never guess, infer, or fill it with a plausible-sounding value. This rule is the entire point
+of this extraction step and is checked directly, so treat every field independently: some fields may be
+present while others are genuinely absent from the same record.
+
+Return ONLY valid JSON in exactly this shape, no markdown, no extra text:
+{
+  "buyer_name": {"value": "...", "available": true},
+  "contract_object": {"value": "...", "available": true},
+  "procedure_type": {"value": "not available", "available": false},
+  "submission_deadline": {"value": "...", "available": true},
+  "estimated_value": {"value": "not available", "available": false},
+  "contact_email": {"value": "not available", "available": false},
+  "required_qualifications": {"value": "...", "available": true}
+}`;
+
+  const userMessage = `SOURCE RECORD (raw, as ingested from the connector):
+Title: ${opp.title}
+Description: ${opp.description || ''}
+Deadline field: ${opp.deadline || ''}
+Estimated value field: ${opp.estimated_value || ''}
+Location: ${opp.location_city || ''}, ${opp.location_region || ''}
+Raw source payload: ${opp.raw_data ? JSON.stringify(opp.raw_data).substring(0, 2000) : '{}'}`;
+
+  const response = await callClaudeAPI([{ role: 'user', content: userMessage }], systemPrompt, 1000);
+
+  let facts: ExtractedOpportunityFacts;
+  try {
+    facts = JSON.parse(response);
+  } catch (err) {
+    logger.warn(`Failed to parse fact extraction response for ${opportunityId}`);
+    throw new Error('Invalid fact extraction response format');
+  }
+
+  await db.query(
+    `UPDATE opportunities SET ai_extracted_facts = $1, updated_at = NOW() WHERE id = $2`,
+    [JSON.stringify(facts), opportunityId]
+  );
+
+  logger.info(`✅ Extracted facts for opportunity ${opportunityId}`);
+  return facts;
+};
+
+// ============================================================================
 // CLASSIFICATION ENGINE (MILESTONE 6)
 // ============================================================================
 
