@@ -4,7 +4,7 @@
   "description": "French Public Procurement Opportunities Platform - Backend API",
   "main": "dist/src/server.js",
   "scripts": {
-    "dev": "ts-node src/server.ts",
+    "dev": "ts-node --files src/server.ts",
     "build": "tsc",
     "start": "node dist/src/server.js",
     "db:migrate": "node scripts/migrate.js",
@@ -70,5 +70,8 @@
   },
   "engines": {
     "node": ">=18.0.0"
+  },
+  "ts-node": {
+    "files": true
   }
 }

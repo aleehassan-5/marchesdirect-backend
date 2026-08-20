@@ -794,9 +794,35 @@ CREATE INDEX opportunity_search_index_deadline ON opportunity_search_index(deadl
 -- 17. CONSTRAINTS & TRIGGERS
 -- ============================================================================
 
--- Prevent companies from accessing other companies' data
-CREATE TRIGGER check_company_isolation 
-BEFORE UPDATE ON opportunities
+-- Prevent a company's private records from being silently reassigned to another
+-- company via a buggy/malicious UPDATE. This was previously attached to the
+-- `opportunities` table (which has no company_id column at all - global tender
+-- listings, not per-company data) and called a function that was never defined,
+-- so it silently failed to create and enforced nothing. Fixed to define the
+-- function and attach it to the tables that actually hold per-company data.
+-- Note: this covers UPDATE/INSERT only, not SELECT - the application layer
+-- (WHERE company_id = $1 on every company-scoped query, already the pattern
+-- used in routes/tenders.ts etc.) remains the primary defense; this trigger is
+-- a DB-level backstop against company_id ever being changed after the fact,
+-- not a replacement for row-level security.
+CREATE OR REPLACE FUNCTION prevent_cross_company_access()
+RETURNS TRIGGER AS $$
+BEGIN
+  IF TG_OP = 'UPDATE' AND OLD.company_id IS DISTINCT FROM NEW.company_id THEN
+    RAISE EXCEPTION 'company_id cannot be changed once a record is created (attempted % -> %)',
+      OLD.company_id, NEW.company_id;
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER check_company_isolation_bid_responses
+BEFORE UPDATE ON bid_responses
+FOR EACH ROW
+EXECUTE FUNCTION prevent_cross_company_access();
+
+CREATE TRIGGER check_company_isolation_company_documents
+BEFORE UPDATE ON company_documents
 FOR EACH ROW
 EXECUTE FUNCTION prevent_cross_company_access();
 
@@ -869,3 +895,45 @@ INSERT INTO data_sources (code, name, feed_type, frequency_hours, active) VALUES
 ('boamp', 'BOAMP Official Feed', 'api', 6, true),
 ('place', 'PLACE Government Platform', 'api', 6, false),
 ('ted', 'TED EU Tenders', 'api', 12, false);
+
+-- BTP/construction CPV codes (real EU Common Procurement Vocabulary, division 45xxxxxx)
+-- and the trades that map to them. Without this, classification and matching have
+-- nothing to link opportunities/companies to - both would silently return empty
+-- results even with a working AI classification call.
+INSERT INTO cpv_codes (code, name, sector) VALUES
+('45000000', 'Construction work', 'construction'),
+('45111000', 'Demolition, site clearance and site preparation work', 'construction'),
+('45210000', 'Building construction work', 'construction'),
+('45223000', 'Structural works', 'construction'),
+('45261000', 'Roof works and other special trade construction works', 'construction'),
+('45262500', 'Masonry and bricklaying work', 'construction'),
+('45310000', 'Electrical installation work', 'construction'),
+('45330000', 'Plumbing and sanitary works', 'construction'),
+('45331000', 'Heating, ventilation and air-conditioning installation work', 'construction'),
+('45320000', 'Insulation work', 'construction'),
+('45410000', 'Plastering work', 'construction'),
+('45420000', 'Joinery and carpentry installation work', 'construction'),
+('45430000', 'Floor and wall covering work', 'construction'),
+('45440000', 'Painting and glazing work', 'construction'),
+('45233000', 'Road construction work', 'construction'),
+('45232000', 'Ancillary works for pipelines and cables', 'construction')
+ON CONFLICT (code) DO NOTHING;
+
+INSERT INTO trades (name, slug, description, cpv_code_id) VALUES
+('Gros oeuvre', 'gros-oeuvre', 'Structural work, foundations, load-bearing walls', (SELECT id FROM cpv_codes WHERE code = '45223000')),
+('Demolition', 'demolition', 'Demolition, site clearance and preparation', (SELECT id FROM cpv_codes WHERE code = '45111000')),
+('Maconnerie', 'maconnerie', 'Masonry and bricklaying', (SELECT id FROM cpv_codes WHERE code = '45262500')),
+('Charpente', 'charpente', 'Roof framing and structural carpentry', (SELECT id FROM cpv_codes WHERE code = '45261000')),
+('Couverture', 'couverture', 'Roofing and roof waterproofing', (SELECT id FROM cpv_codes WHERE code = '45261000')),
+('Electricite', 'electricite', 'Electrical installation work', (SELECT id FROM cpv_codes WHERE code = '45310000')),
+('Plomberie', 'plomberie', 'Plumbing and sanitary installation', (SELECT id FROM cpv_codes WHERE code = '45330000')),
+('CVC', 'cvc', 'Heating, ventilation and air conditioning', (SELECT id FROM cpv_codes WHERE code = '45331000')),
+('Isolation', 'isolation', 'Thermal and acoustic insulation', (SELECT id FROM cpv_codes WHERE code = '45320000')),
+('Platrerie', 'platrerie', 'Plastering and drywall', (SELECT id FROM cpv_codes WHERE code = '45410000')),
+('Menuiserie', 'menuiserie', 'Joinery, windows and doors', (SELECT id FROM cpv_codes WHERE code = '45420000')),
+('Carrelage', 'carrelage', 'Floor and wall tiling', (SELECT id FROM cpv_codes WHERE code = '45430000')),
+('Peinture', 'peinture', 'Painting and surface finishing', (SELECT id FROM cpv_codes WHERE code = '45440000')),
+('Vitrerie', 'vitrerie', 'Glazing work', (SELECT id FROM cpv_codes WHERE code = '45440000')),
+('Voirie et reseaux (VRD)', 'vrd', 'Road works and utility networks', (SELECT id FROM cpv_codes WHERE code = '45233000')),
+('Batiment general', 'batiment-general', 'General building construction', (SELECT id FROM cpv_codes WHERE code = '45210000'))
+ON CONFLICT (name) DO NOTHING;
