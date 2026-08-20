@@ -126,6 +126,7 @@ const normalizeBoampRecord = (record: any) => {
 
 export const collectPlaceData = async (sourceId: number) => {
   const logId = uuid();
+  const startedAt = new Date();
 
   try {
     logger.info(`[PLACE] Starting collection (log: ${logId})`);
@@ -152,7 +153,7 @@ export const collectPlaceData = async (sourceId: number) => {
 
     let inserted = 0;
     let updated = 0;
-    let duplicates = 0;
+    let errors = 0;
 
     for (const notice of notices) {
       try {
@@ -168,18 +169,41 @@ export const collectPlaceData = async (sourceId: number) => {
           await insertOpportunity(sourceId, notice);
           inserted++;
         }
-
-        duplicates += await deduplicateOpportunities();
       } catch (err) {
         logger.error(`[PLACE] Error processing notice ${notice.id}:`, err);
+        errors++;
       }
     }
 
-    logger.info(`[PLACE] Collection complete: ${inserted} inserted, ${updated} updated`);
+    // Deduplicate once per batch, same as the BOAMP connector - not once per record,
+    // which would rescan the whole opportunities table on every single insert.
+    const duplicates = await deduplicateOpportunities();
 
-    return { inserted, updated, duplicates };
+    await db.query(
+      `INSERT INTO connector_logs 
+        (source_id, status, records_fetched, records_processed, records_failed, started_at, completed_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [sourceId, 'success', notices.length, inserted + updated, errors, startedAt, new Date()]
+    );
+
+    await db.query(
+      "UPDATE data_sources SET last_run = NOW(), next_run = NOW() + INTERVAL '6 hours', total_imports = total_imports + $2 WHERE id = $1",
+      [sourceId, inserted]
+    );
+
+    logger.info(`[PLACE] Collection complete: ${inserted} inserted, ${updated} updated, ${duplicates} duplicates merged`);
+
+    return { inserted, updated, duplicates, errors };
   } catch (err) {
     logger.error(`[PLACE] Collection failed:`, err);
+
+    await db.query(
+      `INSERT INTO connector_logs 
+        (source_id, status, error_message, started_at, completed_at)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [sourceId, 'failed', String(err), startedAt, new Date()]
+    );
+
     throw err;
   }
 };
@@ -189,6 +213,8 @@ export const collectPlaceData = async (sourceId: number) => {
 // ============================================================================
 
 export const collectTedData = async (sourceId: number) => {
+  const startedAt = new Date();
+
   try {
     logger.info(`[TED] Starting collection`);
 
@@ -199,6 +225,7 @@ export const collectTedData = async (sourceId: number) => {
 
     let inserted = 0;
     let updated = 0;
+    let errors = 0;
 
     for (const item of feed.items || []) {
       try {
@@ -227,14 +254,38 @@ export const collectTedData = async (sourceId: number) => {
         }
       } catch (err) {
         logger.error(`[TED] Error processing item:`, err);
+        errors++;
       }
     }
 
-    logger.info(`[TED] Collection complete: ${inserted} inserted, ${updated} updated`);
+    // Deduplicate once per batch, same as BOAMP/PLACE.
+    const duplicates = await deduplicateOpportunities();
 
-    return { inserted, updated };
+    await db.query(
+      `INSERT INTO connector_logs 
+        (source_id, status, records_fetched, records_processed, records_failed, started_at, completed_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [sourceId, 'success', feed.items?.length || 0, inserted + updated, errors, startedAt, new Date()]
+    );
+
+    await db.query(
+      "UPDATE data_sources SET last_run = NOW(), next_run = NOW() + INTERVAL '6 hours', total_imports = total_imports + $2 WHERE id = $1",
+      [sourceId, inserted]
+    );
+
+    logger.info(`[TED] Collection complete: ${inserted} inserted, ${updated} updated, ${duplicates} duplicates merged`);
+
+    return { inserted, updated, duplicates, errors };
   } catch (err) {
     logger.error(`[TED] Collection failed:`, err);
+
+    await db.query(
+      `INSERT INTO connector_logs 
+        (source_id, status, error_message, started_at, completed_at)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [sourceId, 'failed', String(err), startedAt, new Date()]
+    );
+
     throw err;
   }
 };
