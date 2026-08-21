@@ -12,7 +12,7 @@ import { errorHandler } from './middleware/errorHandler';
 import { authenticate } from './middleware/auth';
 
 // Load environment variables
-dotenv.config({ path: path.resolve(__dirname, '../.env') });
+dotenv.config({ path: path.resolve(process.cwd(), '.env') });
 
 // Initialize Express app
 const app: Express = express();

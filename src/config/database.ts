@@ -3,7 +3,7 @@ import dotenv from 'dotenv';
 import path from 'path';
 import { logger } from '../utils/logger';
 
-dotenv.config({ path: path.resolve(__dirname, '../../.env') });
+dotenv.config({ path: path.resolve(process.cwd(), '.env') });
 
 // Prefer a single DATABASE_URL (e.g. Supabase's "Session pooler" connection
 // string) when present — simplest to configure on Render (one env var).
@@ -116,7 +116,7 @@ export const ensureSchema = async (): Promise<void> => {
 
     logger.info('⏳ No schema detected — loading schema.sql automatically...');
     const fs = await import('fs');
-    const schemaPath = path.resolve(__dirname, '../../schema.sql');
+    const schemaPath = path.resolve(process.cwd(), 'schema.sql');
     const schemaSql = fs.readFileSync(schemaPath, 'utf-8');
     await pool.query(schemaSql);
     logger.info('✅ Schema loaded successfully from schema.sql');
