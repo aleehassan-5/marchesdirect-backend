@@ -6,7 +6,7 @@ import rateLimit from 'express-rate-limit';
 import dotenv from 'dotenv';
 import path from 'path';
 
-import { db } from './config/database';
+import { db, ensureSchema } from './config/database';
 import { logger } from './utils/logger';
 import { errorHandler } from './middleware/errorHandler';
 import { authenticate } from './middleware/auth';
@@ -129,6 +129,10 @@ const startServer = async () => {
     // Test database connection
     await db.query('SELECT NOW()');
     logger.info('✅ Database connected successfully');
+
+    // Auto-load schema.sql if this is a fresh/empty database (e.g. brand new
+    // Supabase project) — no manual psql step required.
+    await ensureSchema();
 
     // Start background jobs
     require('./jobs/dataCollection').startScheduledJobs();

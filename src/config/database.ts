@@ -5,17 +5,32 @@ import { logger } from '../utils/logger';
 
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
-const pool = new Pool({
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  host: process.env.DB_HOST,
-  port: parseInt(process.env.DB_PORT || '5432'),
-  database: process.env.DB_NAME,
-  ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
-  max: 20,
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 2000,
-});
+// Prefer a single DATABASE_URL (e.g. Supabase's "Session pooler" connection
+// string) when present — simplest to configure on Render (one env var).
+// Falls back to split DB_HOST/DB_PORT/DB_USER/DB_PASSWORD/DB_NAME if not set.
+// SSL defaults ON when using DATABASE_URL since Supabase's pooler requires it;
+// set DB_SSL=false to explicitly disable (e.g. local Postgres with no SSL).
+const connectionString = process.env.DATABASE_URL;
+
+const pool = connectionString
+  ? new Pool({
+      connectionString,
+      ssl: process.env.DB_SSL === 'false' ? false : { rejectUnauthorized: false },
+      max: 20,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 10000,
+    })
+  : new Pool({
+      user: process.env.DB_USER,
+      password: process.env.DB_PASSWORD,
+      host: process.env.DB_HOST,
+      port: parseInt(process.env.DB_PORT || '5432'),
+      database: process.env.DB_NAME,
+      ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
+      max: 20,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 10000,
+    });
 
 pool.on('error', (err) => {
   logger.error('Unexpected error on idle client', err);
@@ -79,5 +94,34 @@ export const testConnection = async (): Promise<boolean> => {
   } catch (err) {
     logger.error('❌ Database connection failed:', err);
     return false;
+  }
+};
+
+// Auto-migration: if the schema hasn't been loaded yet (fresh database, e.g.
+// a brand new Supabase project), run schema.sql automatically on boot so
+// nobody has to run `psql -f schema.sql` by hand. Safe to call on every
+// startup — it's a no-op once the schema already exists.
+export const ensureSchema = async (): Promise<void> => {
+  try {
+    const check = await db.query(
+      `SELECT EXISTS (
+         SELECT FROM information_schema.tables
+         WHERE table_schema = 'public' AND table_name = 'opportunities'
+       ) AS exists`
+    );
+    if (check.rows[0]?.exists) {
+      logger.info('✅ Schema already present, skipping auto-migration');
+      return;
+    }
+
+    logger.info('⏳ No schema detected — loading schema.sql automatically...');
+    const fs = await import('fs');
+    const schemaPath = path.resolve(__dirname, '../../schema.sql');
+    const schemaSql = fs.readFileSync(schemaPath, 'utf-8');
+    await pool.query(schemaSql);
+    logger.info('✅ Schema loaded successfully from schema.sql');
+  } catch (err) {
+    logger.error('❌ Auto-migration failed — schema may be partially applied. Check manually.', err);
+    throw err;
   }
 };
