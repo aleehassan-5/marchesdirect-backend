@@ -88,7 +88,7 @@ export const db = {
 // Test connection on startup
 export const testConnection = async (): Promise<boolean> => {
   try {
-    const result = await db.query('SELECT NOW()');
+    await db.query('SELECT NOW()');
     logger.info('✅ Database connection successful');
     return true;
   } catch (err) {

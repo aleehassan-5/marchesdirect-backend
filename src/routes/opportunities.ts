@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { classifyOpportunity, generateOpportunitySummary, extractOpportunityFacts } from '../services/aiService';
-import { optionalAuth, AuthRequest } from '../middleware/auth';
+import { optionalAuth } from '../middleware/auth';
 
 const router = Router();
 

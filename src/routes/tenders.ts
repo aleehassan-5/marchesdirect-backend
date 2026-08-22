@@ -3,7 +3,7 @@ import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { AuthRequest } from '../middleware/auth';
 import { generateBidPackageZip, uploadToS3IfConfigured } from '../services/documentService';
-import { analyzeTenderDocuments, generateTechnicalMemo } from '../services/aiService';
+import { analyzeTenderDocuments } from '../services/aiService';
 
 const router = Router();
 

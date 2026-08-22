@@ -1,5 +1,4 @@
 import axios from 'axios';
-import xml2js from 'xml2js';
 import Parser from 'rss-parser';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';

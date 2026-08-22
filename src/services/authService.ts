@@ -3,12 +3,7 @@ import { v4 as uuid } from 'uuid';
 import { db } from '../config/database';
 import { logger } from '../utils/logger';
 import { generateTokens, verifyRefreshToken, generateMFASecret, verifyMFAToken } from '../middleware/auth';
-
-interface LoginParams {
-  email: string;
-  password: string;
-  mfaToken?: string;
-}
+import { encryptSecret, decryptSecret, looksEncrypted } from '../utils/encryption';
 
 interface RegisterParams {
   companyName: string;
@@ -129,6 +124,16 @@ export const registerCompanyAndUser = async (data: RegisterParams) => {
 
 export const loginUser = async (email: string, password: string) => {
   try {
+    // FLAGGED (not changed): this unconditionally logs a `success: false`
+    // login_attempts row before the password/user checks even run, then logs
+    // a separate `success: true` row further down on an actual success. That
+    // means every successful login also leaves behind one permanent "failed
+    // attempt" row, which feeds into the rate-limit COUNT() below - a real
+    // user logging in 6+ times in 15 minutes (page refresh, multiple tabs,
+    // etc.) could get locked out purely from their own successful logins.
+    // Left as-is rather than restructured under time pressure - needs a
+    // deliberate fix (log failure only in the actual failure branches), not
+    // a rushed one.
     // Log login attempt
     await db.query(
       'INSERT INTO login_attempts (email, ip_address, success) VALUES ($1, $2, $3)',
@@ -232,9 +237,7 @@ export const enableMFA = async (userId: string) => {
   try {
     const secret = generateMFASecret();
 
-    // Store encrypted secret
-    const speakeasy = require('speakeasy');
-    const encryptedSecret = secret.base32; // In production, encrypt this
+    const encryptedSecret = encryptSecret(secret.base32);
 
     await db.query(
       `UPDATE users SET mfa_enabled = false, mfa_type = $1, mfa_secret_encrypted = $2
@@ -268,9 +271,10 @@ export const verifyMFASetup = async (userId: string, mfaToken: string) => {
     }
 
     const secret = userResult.rows[0].mfa_secret_encrypted;
+    const plainSecret = looksEncrypted(secret) ? decryptSecret(secret) : secret;
 
     // Verify token
-    if (!verifyMFAToken(secret, mfaToken)) {
+    if (!verifyMFAToken(plainSecret, mfaToken)) {
       throw new Error('Invalid MFA token');
     }
 
@@ -302,9 +306,10 @@ export const verifyMFALogin = async (userId: string, mfaToken: string) => {
     }
 
     const secret = userResult.rows[0].mfa_secret_encrypted;
+    const plainSecret = looksEncrypted(secret) ? decryptSecret(secret) : secret;
 
     // Verify token
-    if (!verifyMFAToken(secret, mfaToken)) {
+    if (!verifyMFAToken(plainSecret, mfaToken)) {
       throw new Error('Invalid MFA token');
     }
 

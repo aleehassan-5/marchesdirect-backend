@@ -8,8 +8,6 @@
     "build": "tsc",
     "postinstall": "npm run build",
     "start": "node dist/src/server.js",
-    "db:migrate": "node scripts/migrate.js",
-    "db:seed": "node scripts/seed.js",
     "test": "jest",
     "test:watch": "jest --watch",
     "lint": "eslint src --ext .ts",
